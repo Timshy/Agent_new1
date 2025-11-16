@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+实时训练监控仪表板 (Real-time Training Dashboard)
+====================================================
+使用 Streamlit 实时展示训练进度、指标、样本分布等信息
+"""
+
+import json
+import time
+from pathlib import Path
+from datetime import datetime, timedelta
+import threading
+
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+
+def load_metrics_history(monitor_dir: Path):
+    """加载指标历史"""
+    metrics_path = monitor_dir / "metrics_history.json"
+    if metrics_path.exists():
+        try:
+            with open(metrics_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"加载指标历史失败: {e}")
+            return []
+    return []
+
+
+def load_current_status(monitor_dir: Path):
+    """加载当前状态"""
+    status_path = monitor_dir / "current_status.json"
+    if status_path.exists():
+        try:
+            with open(status_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"加载当前状态失败: {e}")
+            return {}
+    return {}
+
+
+def create_metrics_chart(df):
+    """创建性能指标图表"""
+    if df.empty:
+        return None
+    
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("Dice 分数", "Precision 分数", "Recall 分数", "F1 分数"),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=df['round'], y=df['dice'], mode='lines+markers', 
+                   name='Dice', line=dict(color='#1f77b4', width=2)),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=df['round'], y=df['precision'], mode='lines+markers',
+                   name='Precision', line=dict(color='#ff7f0e', width=2)),
+        row=1, col=2
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=df['round'], y=df['recall'], mode='lines+markers',
+                   name='Recall', line=dict(color='#2ca02c', width=2)),
+        row=2, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=df['round'], y=df['f1'], mode='lines+markers',
+                   name='F1', line=dict(color='#d62728', width=2)),
+        row=2, col=2
+    )
+    
+    fig.update_xaxes(title_text="轮次", row=1, col=1)
+    fig.update_yaxes(title_text="Dice", row=1, col=1, range=[0, 1])
+    
+    fig.update_xaxes(title_text="轮次", row=1, col=2)
+    fig.update_yaxes(title_text="Precision", row=1, col=2, range=[0, 1])
+    
+    fig.update_xaxes(title_text="轮次", row=2, col=1)
+    fig.update_yaxes(title_text="Recall", row=2, col=1, range=[0, 1])
+    
+    fig.update_xaxes(title_text="轮次", row=2, col=2)
+    fig.update_yaxes(title_text="F1", row=2, col=2, range=[0, 1])
+    
+    fig.update_layout(height=800, showlegend=False, hovermode='x unified')
+    return fig
+
+
+def create_pseudo_label_chart(df):
+    """创建伪标签增长图表"""
+    if df.empty:
+        return None
+    
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("伪标签总数变化", "每轮选中样本数"),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=df['round'], y=df['pseudo_total'], mode='lines+markers',
+                   name='伪标签总数', line=dict(color='#1f77b4', width=2),
+                   fill='tozeroy'),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Bar(x=df['round'], y=df['selected'], name='每轮选中',
+               marker=dict(color='#ff7f0e')),
+        row=1, col=2
+    )
+    
+    fig.update_xaxes(title_text="轮次", row=1, col=1)
+    fig.update_yaxes(title_text="数量", row=1, col=1)
+    
+    fig.update_xaxes(title_text="轮次", row=1, col=2)
+    fig.update_yaxes(title_text="数量", row=1, col=2)
+    
+    fig.update_layout(height=400, showlegend=True, hovermode='x unified')
+    return fig
+
+
+def create_confidence_chart(df):
+    """创建置信度分布图表"""
+    if df.empty:
+        return None
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df['round'], y=df['avg_confidence'],
+        mode='lines+markers',
+        name='平均置信度',
+        line=dict(color='#2ca02c', width=2),
+        marker=dict(size=8),
+        fill='tozeroy'
+    ))
+    
+    fig.update_layout(
+        title="LLM 评分置信度趋势",
+        xaxis_title="轮次",
+        yaxis_title="置信度 (0-100)",
+        height=400,
+        hovermode='x unified',
+        template='plotly_white'
+    )
+    
+    return fig
+
+
+def create_sample_chart(df):
+    """创建样本抽取分布图表"""
+    if df.empty:
+        return None
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=df['round'], y=df['sampled'],
+        name='抽取数量',
+        marker=dict(color='#1f77b4')
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=df['round'], y=df['selected'],
+        name='选中数量',
+        mode='lines+markers',
+        line=dict(color='#d62728', width=2),
+        yaxis='y2'
+    ))
+    
+    fig.update_layout(
+        title="样本抽取与选中情况",
+        xaxis_title="轮次",
+        yaxis_title="抽取数量",
+        yaxis2=dict(title="选中数量", overlaying="y", side="right"),
+        height=400,
+        hovermode='x unified',
+        template='plotly_white'
+    )
+    
+    return fig
+
+
+def main():
+    st.set_page_config(
+        page_title="训练监控仪表板",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    st.title("🚀 医学图像分割 - 实时训练监控仪表板")
+    
+    # 从命令行参数或环境变量获取默认 work_root
+    import sys
+    default_work_root = "./work"
+    if len(sys.argv) > 1:
+        # 检查是否有 --work-root 参数
+        for i, arg in enumerate(sys.argv):
+            if arg == "--work-root" and i + 1 < len(sys.argv):
+                default_work_root = sys.argv[i + 1]
+                break
+    
+    with st.sidebar:
+        st.header("⚙️ 配置")
+        work_root = st.text_input(
+            "工作根目录",
+            value=default_work_root,
+            help="训练工作目录路径"
+        )
+        
+        monitor_dir = Path(work_root) / "monitor"
+        
+        auto_refresh = st.checkbox("自动刷新", value=True, help="启用自动刷新 (5秒)")
+        if auto_refresh:
+            st.info("页面将每5秒自动刷新一次")
+    
+    if not Path(work_root).exists():
+        st.error(f"❌ 工作目录不存在: {work_root}")
+        st.stop()
+    
+    if not monitor_dir.exists():
+        st.warning(f"⏳ 监控目录不存在，等待训练开始...")
+        st.info(f"预期路径: {monitor_dir}")
+        st.stop()
+    
+    # 加载数据
+    metrics_history = load_metrics_history(monitor_dir)
+    current_status = load_current_status(monitor_dir)
+    
+    # 顶部状态卡片
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        current_round = current_status.get('current_round', 0)
+        max_rounds = current_status.get('max_rounds', 0)
+        st.metric(
+            "📍 当前轮次",
+            f"{current_round}/{max_rounds}",
+            delta=f"{current_round}" if current_round > 0 else None
+        )
+    
+    with col2:
+        best_dice = current_status.get('best_dice', 0)
+        st.metric(
+            "🎯 最佳 Dice",
+            f"{best_dice:.4f}",
+            delta=f"Round {current_status.get('best_round', 0)}" if best_dice > 0 else None
+        )
+    
+    with col3:
+        pseudo_count = current_status.get('pseudo_count', 0)
+        st.metric(
+            "🏷️ 伪标签数量",
+            f"{pseudo_count}",
+            delta=f"+{pseudo_count}" if pseudo_count > 0 else None
+        )
+    
+    with col4:
+        remaining_images = current_status.get('remaining_images', 0)
+        st.metric(
+            "📦 剩余未标注",
+            f"{remaining_images}",
+            delta=f"-{remaining_images}" if remaining_images >= 0 else None
+        )
+    
+    with col5:
+        last_update = current_status.get('last_update')
+        if last_update:
+            last_update_time = datetime.fromisoformat(last_update)
+            time_ago = datetime.now() - last_update_time
+            if time_ago.total_seconds() < 60:
+                status_text = f"{int(time_ago.total_seconds())}秒前"
+            else:
+                status_text = f"{int(time_ago.total_seconds() / 60)}分钟前"
+            st.metric("🕐 最后更新", status_text)
+        else:
+            st.metric("🕐 最后更新", "未更新")
+    
+    st.divider()
+    
+    # 如果没有数据，提示用户
+    if not metrics_history:
+        st.info("⏳ 等待第一轮训练完成... 监控数据将在此显示")
+        if auto_refresh:
+            time.sleep(5)
+            st.rerun()
+        st.stop()
+    
+    # 转换为 DataFrame
+    df = pd.DataFrame(metrics_history)
+    
+    # 创建标签页
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 性能指标", 
+        "🏷️ 伪标签管理", 
+        "💯 置信度分析", 
+        "📊 样本分析",
+        "📋 详细数据"
+    ])
+    
+    with tab1:
+        st.subheader("性能指标变化")
+        st.info("展示 Dice、Precision、Recall、F1 四个关键指标的变化趋势")
+        
+        fig = create_metrics_chart(df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("数据不足")
+    
+    with tab2:
+        st.subheader("伪标签增长与样本选择")
+        st.info("展示伪标签集合的增长情况和每轮选中的样本数")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            fig = create_pseudo_label_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.metric("总伪标签数", df['pseudo_total'].iloc[-1] if not df.empty else 0)
+            st.metric("总选中样本", df['selected'].sum() if not df.empty else 0)
+            st.metric("平均选中率", f"{(df['selected'].sum() / df['sampled'].sum() * 100):.1f}%" if df['sampled'].sum() > 0 else "0%")
+    
+    with tab3:
+        st.subheader("LLM 评分置信度分析")
+        st.info("展示 LLM Vision API 给出的平均置信度趋势")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            fig = create_confidence_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.metric("最高置信度", f"{df['avg_confidence'].max():.2f}")
+            st.metric("最低置信度", f"{df['avg_confidence'].min():.2f}")
+            st.metric("平均置信度", f"{df['avg_confidence'].mean():.2f}")
+    
+    with tab4:
+        st.subheader("样本抽取分析")
+        st.info("展示每轮的样本抽取数量和最终选中数量")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            fig = create_sample_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            total_sampled = df['sampled'].sum()
+            total_selected = df['selected'].sum()
+            st.metric("总抽取样本", total_sampled)
+            st.metric("总选中样本", total_selected)
+            st.metric("选中率", f"{(total_selected / total_sampled * 100):.1f}%" if total_sampled > 0 else "0%")
+    
+    with tab5:
+        st.subheader("详细指标数据表")
+        st.info("所有轮次的详细指标数据")
+        
+        # 保留时间戳以便显示
+        display_df = df.copy()
+        if 'timestamp' in display_df.columns:
+            display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 重新排列列顺序
+        col_order = ['round', 'sampled', 'selected', 'avg_confidence', 'pseudo_total', 
+                     'dice', 'precision', 'recall', 'f1', 'is_best']
+        available_cols = [col for col in col_order if col in display_df.columns]
+        if 'timestamp' in display_df.columns:
+            available_cols.append('timestamp')
+        
+        display_df = display_df[available_cols]
+        
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'round': st.column_config.NumberColumn('轮次', format='%d'),
+                'sampled': st.column_config.NumberColumn('抽取', format='%d'),
+                'selected': st.column_config.NumberColumn('选中', format='%d'),
+                'avg_confidence': st.column_config.NumberColumn('置信度', format='%.2f'),
+                'pseudo_total': st.column_config.NumberColumn('伪标签总数', format='%d'),
+                'dice': st.column_config.NumberColumn('Dice', format='%.4f'),
+                'precision': st.column_config.NumberColumn('Precision', format='%.4f'),
+                'recall': st.column_config.NumberColumn('Recall', format='%.4f'),
+                'f1': st.column_config.NumberColumn('F1', format='%.4f'),
+                'is_best': st.column_config.CheckboxColumn('最佳模型'),
+                'timestamp': st.column_config.TextColumn('时间戳')
+            }
+        )
+    
+    st.divider()
+    
+    # 页脚信息
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("📍 工作目录: " + str(work_root))
+    with col2:
+        if current_status:
+            progress_pct = (current_round / max_rounds * 100) if max_rounds > 0 else 0
+            st.caption(f"⏱️ 进度: {progress_pct:.1f}%")
+        else:
+            st.caption("⏱️ 进度: 0%")
+    with col3:
+        st.caption("🔄 自动刷新: " + ("✓" if auto_refresh else "✗"))
+    
+    # 自动刷新
+    if auto_refresh:
+        time.sleep(5)
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()
