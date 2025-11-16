@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+一键启动训练 + Streamlit 实时监控 Dashboard
+适配你的路径：E:\LLM&agentTest\CTO
+"""
+
+import subprocess
+import time
+import webbrowser
+import threading
+import os
+from pathlib import Path
+
+
+# ============ 配置 ============
+
+ROOT_DIR = r"E:\\LLM&agentTest\\CTO"
+
+# 训练脚本路径
+AGENT_SCRIPT = os.path.join(ROOT_DIR, "agent.py")
+
+# Streamlit Dashboard 路径
+DASHBOARD_SCRIPT = os.path.join(ROOT_DIR, "dashboard.py")
+
+# 工作目录（和 agent.py 的 work-root 保持一致）
+WORK_ROOT = os.path.join(ROOT_DIR, "my_custom_work")
+
+# 是否自动打开浏览器
+AUTO_OPEN_BROWSER = True
+
+
+
+# ============ 启动训练 ============
+
+def start_training():
+    print("🚀 启动训练脚本 agent.py ...")
+
+    cmd = ["python", AGENT_SCRIPT]
+
+    # 确保在训练目录启动
+    process = subprocess.Popen(
+        cmd,
+        cwd=ROOT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def reader_thread():
+        for line in process.stdout:
+            print("【训练日志】", line, end="")
+
+    threading.Thread(target=reader_thread, daemon=True).start()
+    return process
+
+
+
+# ============ 启动 Dashboard ============
+
+def start_dashboard():
+    print("📊 启动 Streamlit Dashboard ...")
+
+    cmd = [
+        "streamlit",
+        "run",
+        DASHBOARD_SCRIPT,
+        "--",
+        "--work-root",
+        WORK_ROOT
+    ]
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=ROOT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    def reader_thread():
+        for line in process.stdout:
+            print("【Dashboard】", line, end="")
+
+    threading.Thread(target=reader_thread, daemon=True).start()
+    return process
+
+
+
+# ============ 自动打开浏览器 ============
+
+def open_browser_later():
+    time.sleep(5)
+    url = "http://localhost:8501"
+    print(f"🌐 打开浏览器: {url}")
+    webbrowser.open(url)
+
+
+
+# ============ 主入口 ============
+
+def main():
+
+    print("========================================")
+    print("📢 一键启动：训练 + 实时可视化监控")
+    print("========================================")
+
+    # 创建工作目录
+    if not Path(WORK_ROOT).exists():
+        print(f"⚠️ 工作目录不存在，自动创建: {WORK_ROOT}")
+        Path(WORK_ROOT).mkdir(parents=True, exist_ok=True)
+
+    # 1. 启动训练
+    train_proc = start_training()
+
+    # 2. 启动 Dashboard
+    dash_proc = start_dashboard()
+
+    # 3. 自动打开浏览器
+    if AUTO_OPEN_BROWSER:
+        threading.Thread(target=open_browser_later, daemon=True).start()
+
+    print("\n⏳ 训练进行中，dashboard 正在显示实时状态 ...\n")
+
+    # 等训练结束
+    train_proc.wait()
+
+    print("\n✅ 训练结束！你仍可继续查看 Dashboard 页面。")
+
+
+
+if __name__ == "__main__":
+    main()
